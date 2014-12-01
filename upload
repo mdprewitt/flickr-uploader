@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+
+# from:
+# http://mkelsey.com/2011/07/09/Flickr-Api-Grab-Photos-Example/
+
+
+import oauth2 as oauth
+import keys
+import time
+import httplib2
+import urlparse
+
+def token_file(apikey):
+    return 'token-{0}'.format(apikey)
+
+def get_token():
+    url = "http://www.flickr.com/services/oauth/request_token"
+
+    # Set the base oauth_* parameters along with any other parameters required
+    # for the API call.
+    params = {
+        'oauth_timestamp': str(int(time.time())),
+        'oauth_signature_method':"HMAC-SHA1",
+        'oauth_version': "1.0",
+        'oauth_callback': "http://www.example.com",
+        'oauth_nonce': oauth.generate_nonce(),
+        'oauth_consumer_key': keys.apikey
+    }
+
+    # Setup the Consumer with the api_keys given by the provider
+    consumer = oauth.Consumer(key=keys.apikey, secret=keys.apisecret)
+
+    # Create our request. Change method, etc. accordingly.
+    req = oauth.Request(method="GET", url=url, parameters=params)
+
+    # Create the signature
+    signature = oauth.SignatureMethod_HMAC_SHA1().sign(req,consumer,None)
+
+    # Add the Signature to the request
+    req['oauth_signature'] = signature
+
+    # Make the request to get the oauth_token and the oauth_token_secret
+    # I had to directly use the httplib2 here, instead of the oauth library.
+    h = httplib2.Http(".cache")
+    resp, content = h.request(req.to_url(), "GET")
+
+    authorize_url = "http://www.flickr.com/services/oauth/authorize"
+
+    #parse the content
+    request_token = dict(urlparse.parse_qsl(content))
+
+    print "Request Token:"
+    print "    - oauth_token        = %s" % request_token['oauth_token']
+    print "    - oauth_token_secret = %s" % request_token['oauth_token_secret']
+    print
+
+    # Create the token object with returned oauth_token and oauth_token_secret
+    token = oauth.Token(request_token['oauth_token'],
+        request_token['oauth_token_secret'])
+
+    # You need to authorize this app via your browser.
+    print "Go to the following link in your browser:"
+    print "%s?oauth_token=%s&perms=write" % (authorize_url, request_token['oauth_token'])
+    print
+
+    # Once you get the verified pin, input it
+    accepted = 'n'
+    while accepted.lower() == 'n':
+        accepted = raw_input('Have you authorized me? (y/n) ')
+    oauth_verifier = raw_input('What is the PIN? ')
+
+    #set the oauth_verifier token
+    token.set_verifier(oauth_verifier)
+
+    # url to get access token
+    access_token_url = "http://www.flickr.com/services/oauth/access_token"
+
+    # Now you need to exchange your Request Token for an Access Token
+    # Set the base oauth_* parameters along with any other parameters required
+    # for the API call.
+    access_token_parms = {
+        'oauth_consumer_key': keys.apikey,
+        'oauth_nonce': oauth.generate_nonce(),
+        'oauth_signature_method':"HMAC-SHA1",
+        'oauth_timestamp': str(int(time.time())),
+        'oauth_token':request_token['oauth_token'],
+        'oauth_verifier' : oauth_verifier
+    }
+
+    #setup request
+    req = oauth.Request(method="GET", url=access_token_url,
+        parameters=access_token_parms)
+
+    #create the signature
+    signature = oauth.SignatureMethod_HMAC_SHA1().sign(req,consumer,token)
+
+    # assign the signature to the request
+    req['oauth_signature'] = signature
+
+    #make the request
+    h = httplib2.Http(".cache")
+    resp, content = h.request(req.to_url(), "GET")
+
+    #parse the response
+    access_token_resp = dict(urlparse.parse_qsl(content))
+
+    #write out a file with the oauth_token and oauth_token_secret
+    with open(token_file(keys.apikey) + '.py', 'w') as f:
+        f.write('oauth_token=\'' + access_token_resp['oauth_token'] + '\'\n')
+        f.write('oauth_token_secret=\'' + access_token_resp['oauth_token_secret'] + '\'\n')
+    f.closed
+
+class FlickrApiMethod(object):
+    """Base class for Flickr API calls"""
+
+    def __init__(self,nojsoncallback=True,format='json',parameters=None):
+        apifile = APIKeys()
+        tokenfile = TokenKeys()
+
+        self.consumer = oauth.Consumer(key=apifile.apikey, secret=apifile.apisecret)
+        self.token = oauth.Token(tokenfile.token, tokenfile.secret)
+
+        if nojsoncallback:
+            self.nojsoncallback = 1
+        else:
+            self.nojsoncallback = 0
+        if not parameters:
+            parameters = {}
+
+        self.url = "http://api.flickr.com/services/rest"
+
+        defaults = {
+            'format':format,
+            'nojsoncallback':self.nojsoncallback,
+            'oauth_timestamp': str(int(time.time())),
+            'oauth_nonce': oauth.generate_nonce(),
+            'signature_method': "HMAC-SHA1",
+            'oauth_token':self.token.key,
+            'oauth_consumer_key':self.consumer.key,
+        }
+
+        defaults.update(parameters)
+        self.parameters = defaults
+
+    def makeCall(self):
+        self.parameters.update(self.getParameters())
+        req = oauth.Request(method="GET", url=self.url, parameters=self.parameters)
+        req['oauth_signature'] = oauth.SignatureMethod_HMAC_SHA1().sign(req,self.consumer,self.token)
+        h = httplib2.Http(".cache")
+        resp, content = h.request(req.to_url(), "GET")
+        self.content = content
+        self.json = json.loads(content)
+
+        if self.json["stat"] == "ok":
+            return True
+        else:
+            return False
+
+    def getParameters(self):
+        raise NotImplementedError
+
+class FlickrPhotosGetSizes(FlickrApiMethod):
+    name ='flickr.photos.getSizes'
+
+    def __init__(self,nojsoncallback=True,format='json',parameters=None,photo_id=None):
+        FlickrApiMethod.__init__(self,nojsoncallback,format,parameters)
+        self.photo_id = photo_id
+
+    def getParameters(self):
+        p ={
+            'method':'flickr.photos.getSizes',
+            'photo_id':self.photo_id
+        }
+        return p
+
+    def writePhotos(self):
+        for o in self.json["sizes"]["size"]:
+            opener = urllib2.build_opener()
+            page = opener.open(o["source"])
+            my_picture = page.read()
+            filename = o["label"].replace(' ', '_') +"_" + self.photo_id + o["source"][-4:]
+            print filename
+            fout = open(filename,"wb")
+            fout.write(my_picture)
+            fout.close()
+
+try:
+    tokens = __import__(token_file(keys.apikey))
+except ImportError:
+    get_token()
+    tokens = __import__(token_file(keys.apikey))
+
+print "oauth_token={0}\noauth_token_secret={1}\n".format(tokens.oauth_token, tokens.oauth_token_secret)
+
